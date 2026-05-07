@@ -1203,6 +1203,11 @@ def get_moe_wna16_block_config(
             # at the same time.
             block_size_n = 1024
 
+        # The CUDA moe_wna16 kernel requires BLOCK_SIZE_K // group_size to be
+        # in {1, 2, 4, 8}. Cap before the divisibility adjustment so a small
+        # group_size (e.g. 32) does not produce ratio 16+.
+        block_size_k = min(block_size_k, 8 * group_size)
+
         # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 

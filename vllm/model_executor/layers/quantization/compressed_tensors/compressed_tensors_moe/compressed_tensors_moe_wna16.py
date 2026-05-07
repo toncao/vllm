@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -46,9 +46,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.group_size = weight_quant.group_size
         # grouped actorder isn't supported by this kernel
         assert weight_quant.actorder != "group"
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        self.symmetric = weight_quant.symmetric
 
     def create_weights(
         self,
@@ -118,6 +116,33 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
         set_weight_attrs(w2_scale, {"load_full_w2": False})
+
+        if not self.symmetric:
+            w13_zp = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    num_groups_w13,
+                    w13_num_shards
+                    * intermediate_size_per_partition
+                    // self.packed_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_zero_point", w13_zp)
+            set_weight_attrs(w13_zp, extra_weight_attrs)
+
+            w2_zp = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    num_groups_w2,
+                    hidden_size // self.packed_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_zero_point", w2_zp)
+            set_weight_attrs(w2_zp, extra_weight_attrs)
 
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
@@ -194,6 +219,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
+        if not self.symmetric:
+            # On-disk: (E, num_groups, N // packed_factor) int32, with each
+            # int32 packing `packed_factor = 32 // num_bits` zero points along
+            # the output dim. The moe_wna16 CUDA/Triton kernels consume zero
+            # points as uint8 with layout (E, N // (8 // num_bits), num_groups)
+            # — one byte holds (8 // num_bits) zero points. Reinterpreting the
+            # int32 tensor as uint8 expands the last dim by 4× (yielding
+            # N // (8 // num_bits) bytes); we then transpose the group dim to
+            # the end to match the kernel's expected stride.
+            replace_parameter(
+                layer,
+                "w13_weight_zero_point",
+                layer.w13_weight_zero_point.view(torch.uint8)
+                .transpose(1, 2)
+                .contiguous(),
+            )
+            replace_parameter(
+                layer,
+                "w2_weight_zero_point",
+                layer.w2_weight_zero_point.view(torch.uint8)
+                .transpose(1, 2)
+                .contiguous(),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -208,8 +256,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         return config_builder(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=None,
-            w2_zp=None,
+            w1_zp=getattr(layer, "w13_weight_zero_point", None),
+            w2_zp=getattr(layer, "w2_weight_zero_point", None),
             block_shape=[0, self.group_size],
         )
 
