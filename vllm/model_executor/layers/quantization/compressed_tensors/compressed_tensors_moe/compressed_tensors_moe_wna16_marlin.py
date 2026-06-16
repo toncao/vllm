@@ -476,6 +476,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
@@ -483,6 +486,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             w1_zp=getattr(layer, "w13_weight_zero_point", None),
             w2_zp=getattr(layer, "w2_weight_zero_point", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply_monolithic(

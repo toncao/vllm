@@ -347,12 +347,18 @@ class MoeWNA16Method(FusedMoEMethodBase):
             else int8_w8a16_moe_quant_config
         )
 
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
         return config_builder(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             w1_zp=layer.w13_qzeros if has_zp else None,
             w2_zp=layer.w2_qzeros if has_zp else None,
             block_shape=[0, layer.group_size],
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply(

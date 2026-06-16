@@ -709,6 +709,9 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
@@ -724,6 +727,9 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             a1_gscale=getattr(layer, "w13_input_global_scale", None),
             a2_gscale=getattr(layer, "w2_input_global_scale", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def select_gemm_impl(
