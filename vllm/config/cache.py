@@ -45,9 +45,11 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    block_size: int = Field(default=128, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
-    Accepts None (meaning "use default"). After construction, always int."""
+    Accepts None (meaning "use DEFAULT_BLOCK_SIZE"). After construction, always
+    int. Defaulted to 128 in this fork so MiniMax-M3's sparse kernels (which
+    only support block_size 128) work without an explicit --block-size."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
