@@ -80,6 +80,24 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             return bool(input_ids)
         return False
 
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        """Check if reasoning has ended by counting unbalanced end tokens.
+
+        The chat template may contain ``<mm:think>`` / ``</mm:think>`` examples
+        in the system prompt.  We track balance from the right: only a
+        ``</mm:think>`` that has **no** matching ``<mm:think>`` to its left
+        signals that reasoning has truly ended.
+        """
+        depth = 0
+        for tid in reversed(input_ids):
+            if tid == self.end_token_id:
+                depth += 1
+            elif tid == self.start_token_id:
+                if depth == 0:
+                    return False
+                depth -= 1
+        return depth > 0
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self.end_token_id in input_ids:
             end_index = len(input_ids) - 1 - input_ids[::-1].index(self.end_token_id)
