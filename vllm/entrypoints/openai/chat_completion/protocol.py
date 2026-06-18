@@ -66,6 +66,13 @@ class ChatMessage(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
 
+    @model_serializer(mode="wrap")
+    def _add_reasoning_content(self, serializer, info):
+        data = serializer(self)
+        if self.reasoning is not None:
+            data["reasoning_content"] = self.reasoning
+        return data
+
 
 class ChatCompletionLogProb(OpenAIBaseModel):
     token: str

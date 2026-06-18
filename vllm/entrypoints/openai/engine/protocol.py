@@ -353,6 +353,13 @@ class DeltaMessage(OpenAIBaseModel):
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
+    @model_serializer(mode="wrap")
+    def _add_reasoning_content(self, serializer, info):
+        data = serializer(self)
+        if self.reasoning is not None:
+            data["reasoning_content"] = self.reasoning
+        return data
+
 
 class GenerationError(Exception):
     """raised when finish_reason indicates internal server error (500)"""
