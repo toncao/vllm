@@ -13,6 +13,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
@@ -106,17 +107,27 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         # tp_size heads so each rank gets at least one (GQA replication).
         kv_total_for_sizing = max(self.num_total_kv_heads, tp_size)
 
-        self.qkvr = MergedColumnParallelLinear(
+        # q/k/v fused; r (wr_du) is a separate projection so it can carry a
+        # different quantization scheme (e.g. INT4 q/k/v with bf16 r, as in
+        # W4A16 checkpoints that keep wr_du on the quant-config ignore list --
+        # a fused qkvr would trip vLLM's same-scheme check for merged shards).
+        self.qkv = MergedColumnParallelLinear(
             input_size=config.hidden_size,
             output_sizes=[
                 head_dim * self.num_total_heads,
                 head_dim * kv_total_for_sizing,
                 head_dim * kv_total_for_sizing,
-                self.d_rel * self.num_total_heads,
             ],
             bias=config.q_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkvr",
+            prefix=f"{prefix}.qkv",
+        )
+        self.wr_du = ColumnParallelLinear(
+            input_size=config.hidden_size,
+            output_size=self.d_rel * self.num_total_heads,
+            bias=config.q_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wr_du",
         )
         self.wo_ud = RowParallelLinear(
             input_size=head_dim * self.num_total_heads,
@@ -231,7 +242,11 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         log_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        qkvr, _ = self.qkvr(hidden_states)
+        qkv, _ = self.qkv(hidden_states)
+        r, _ = self.wr_du(hidden_states)
+        # fused_qkvr_prep consumes a single contiguous (T, q|k|v|r) buffer;
+        # rebuild it from the two (potentially differently-quantized) GEMMs.
+        qkvr = torch.cat((qkv, r), dim=-1)
 
         attn_metadata = get_forward_context().attn_metadata
         attn_output = torch.empty(

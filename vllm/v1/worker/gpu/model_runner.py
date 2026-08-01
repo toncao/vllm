@@ -133,6 +133,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
+
+        # Model weight offloader (mirrors the V1 runner): must be set before
+        # any get_offloader() call during model construction, otherwise
+        # --cpu-offload-gb is silently a no-op on the V2 runner.
+        from vllm.model_executor.offloader import create_offloader, set_offloader
+
+        set_offloader(create_offloader(vllm_config.offload_config))
+
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.

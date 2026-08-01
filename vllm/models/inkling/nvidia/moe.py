@@ -20,6 +20,7 @@ in :meth:`InklingMoE.load_expert_weight`.
 from __future__ import annotations
 
 import math
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -260,6 +261,14 @@ class InklingGate(nn.Module):
 # ---------------------------------------------------------------------------
 # MoE layer
 # ---------------------------------------------------------------------------
+
+
+# Per-expert quantized checkpoint tensors, relative to the mlp module:
+# ``experts.<e>.<proj>.<artifact>`` (llm-compressor / compressed-tensors).
+_PER_EXPERT_WEIGHT_RE = re.compile(
+    r"^experts\.(?P<eid>\d+)\.(?P<proj>gate_proj|up_proj|down_proj)"
+    r"\.(?P<suffix>weight.*)$"
+)
 
 
 def _inkling_moe_ep_size() -> int:
@@ -552,6 +561,29 @@ class InklingMoE(nn.Module):
             return [
                 f"sink_experts.{p}" for p in self.sink_experts.load_weight(key, weight)
             ]
+
+        # Per-expert quantized checkpoints (llm-compressor / compressed-tensors
+        # layout: ``experts.<e>.{gate,up,down}_proj.{weight_packed,weight_scale,
+        # weight_zero_point,weight_shape,weight}``). These load through the
+        # FusedMoE standard weight loader, which understands the WNA16 (Marlin)
+        # transposed parameter layouts plus TP/EP sharding — the stacked-tensor
+        # path below is specific to the bf16/NVFP4 release layout.
+        per_expert = _PER_EXPERT_WEIGHT_RE.match(name)
+        if per_expert is not None:
+            experts = self.experts.routed_experts
+            proj = per_expert.group("proj")
+            shard_id = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}[proj]
+            stack = "w2" if proj == "down_proj" else "w13"
+            pname = f"{stack}_{per_expert.group('suffix')}"  # e.g. w13_weight_packed
+            param = getattr(experts, pname, None)
+            if param is None:
+                # Artifact not registered by the active kernel (e.g. a
+                # ``weight_shape`` the backend derives itself) — skip it.
+                return []
+            param.weight_loader(
+                param, weight, name, shard_id, int(per_expert.group("eid"))
+            )
+            return [f"experts.routed_experts.{pname}"]
 
         experts: RoutedExperts = self.experts.routed_experts
         key = name.split(".", 1)[1]

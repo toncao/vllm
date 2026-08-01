@@ -34,14 +34,15 @@ from .layernorm import InklingRMSNorm
 from .model import InklingDecoderLayer, InklingReplicatedEmbedding
 from .ops.norm import embed_dual_rmsnorm_cat, embed_rmsnorm
 
-# Checkpoint attention projections (wq_du/wk_dv/wv_dv/wr_du) -> fused qkvr.
+# Checkpoint attention projections (wq_du/wk_dv/wv_dv) -> fused qkv.
 # Mirrors the backbone's hf_to_vllm_mapper.orig_to_new_stacked; kept as a
 # local (pname, wname, shard) list since the MTP loader remaps by hand.
+# wr_du is not fused (it may carry a different quant scheme than q/k/v) and
+# loads directly under its own name.
 _ATTENTION_PARAMS_MAPPING = [
-    ("qkvr", "wq_du", 0),
-    ("qkvr", "wk_dv", 1),
-    ("qkvr", "wv_dv", 2),
-    ("qkvr", "wr_du", 3),
+    ("qkv", "wq_du", 0),
+    ("qkv", "wk_dv", 1),
+    ("qkv", "wv_dv", 2),
 ]
 
 
@@ -309,12 +310,12 @@ def _load_inkling_mtp_weights(
 
     Checkpoint keys look like ``model.mtp.chain_norm.weight`` and
     ``model.mtp.layers.{i}.{...}``. The transformer block reuses the backbone
-    layer's fused-projection layout, so we apply the same qkvr / gate_up / down
+    layer's fused-projection layout, so we apply the same qkv / gate_up / down
     remapping as ``_load_inkling_weights``. Token embedding and LM head are shared
     (provided by ``load_eagle_model``) and are not present in mtp.safetensors.
     """
     # Per-depth attention is full or sliding-window (config.local_layer_ids);
-    # each depth's qkvr MergedColumnParallelLinear is built with the matching
+    # each depth's qkv MergedColumnParallelLinear is built with the matching
     # (swa_)num_key_value_heads, and its weight_loader handles the TP sharding.
     # The sconv SWA cache pins tp_size <= num_key_value_heads, so tp never
     # exceeds a layer's kv-head count and no GQA K/V replication is needed here.
@@ -368,7 +369,8 @@ def _load_inkling_mtp_weights(
                 "chain_hidden_post_norm is disabled."
             )
 
-        # Fused attention qkvr (wq_du/wk_dv/wv_dv/wr_du -> qkvr).
+        # Fused attention qkv (wq_du/wk_dv/wv_dv -> qkv); wr_du falls through
+        # to the direct-name load below.
         matched = False
         for pname, wname, shard in _ATTENTION_PARAMS_MAPPING:
             if f".attn.{wname}." in name:

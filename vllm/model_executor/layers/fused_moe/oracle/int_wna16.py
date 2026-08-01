@@ -459,6 +459,21 @@ def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
     return bias.reshape(e, 2 * padded_n).contiguous()
 
 
+def _free_dead_input(t: torch.Tensor | None) -> None:
+    """Drop a converted-away input tensor's storage immediately.
+
+    The Marlin conversion allocates a fresh output for every artifact while
+    the inputs stay registered as layer parameters until the caller replaces
+    them after the full conversion returns. On checkpoints whose weights
+    nearly fill the GPU, holding both copies of a layer's expert stack
+    overflows memory; each input is dead as soon as its converted replacement
+    exists, so release it eagerly. The caller's ``replace_parameter`` swap
+    (which registers a brand-new Parameter) is unaffected.
+    """
+    if t is not None and t.is_cuda:
+        t.data = torch.empty(0, dtype=t.dtype, device=t.device)
+
+
 def _process_weights_marlin(
     layer: torch.nn.Module,
     input_dtype: torch.dtype | None,
@@ -587,6 +602,10 @@ def _process_weights_marlin(
         )
 
     # --- Repack weights ---
+    # Each original is released the moment its Marlin replacement exists
+    # (see _free_dead_input): the caller re-registers every parameter after
+    # this function, and holding a layer's expert stack twice can OOM on
+    # weight-dominated deployments.
     marlin_w13_qweight = ops.gptq_marlin_moe_repack(
         marlin_w13_qweight,
         w13_g_idx_sort_indices,
@@ -595,6 +614,7 @@ def _process_weights_marlin(
         num_bits,
         is_a_8bit=is_a_8bit,
     )
+    _free_dead_input(w13_qweight)
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
         marlin_w2_qweight,
         w2_g_idx_sort_indices,
@@ -603,6 +623,7 @@ def _process_weights_marlin(
         num_bits,
         is_a_8bit=is_a_8bit,
     )
+    _free_dead_input(w2_qweight)
 
     # --- Permute scales ---
     marlin_w13_scales = marlin_moe_permute_scales(
@@ -612,6 +633,7 @@ def _process_weights_marlin(
         group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
+    _free_dead_input(w13_scales)
     group_size_or_pack_factor = group_size if group_size != -1 else pack_factor
     marlin_w2_scales = marlin_moe_permute_scales(
         s=marlin_w2_scales,
@@ -620,6 +642,7 @@ def _process_weights_marlin(
         group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
+    _free_dead_input(w2_scales)
 
     if input_dtype == torch.int8:
         if layer.num_groups_w13 > 1:
@@ -633,20 +656,25 @@ def _process_weights_marlin(
 
     # --- Permute zero points ---
     if w13_qzeros is not None and w2_qzeros is not None:
+        _zp_in = w13_qzeros
         w13_qzeros = moe_packed_to_marlin_zero_points(
-            w13_qzeros,
-            size_k=w13_qzeros.shape[1],
-            size_n=w13_qzeros.shape[2] * pack_factor,
+            _zp_in,
+            size_k=_zp_in.shape[1],
+            size_n=_zp_in.shape[2] * pack_factor,
             num_bits=num_bits,
             is_a_8bit=is_a_8bit,
         )
+        _free_dead_input(_zp_in)
+        _zp_in = w2_qzeros
         w2_qzeros = moe_packed_to_marlin_zero_points(
-            w2_qzeros,
-            size_k=w2_qzeros.shape[1],
-            size_n=w2_qzeros.shape[2] * pack_factor,
+            _zp_in,
+            size_k=_zp_in.shape[1],
+            size_n=_zp_in.shape[2] * pack_factor,
             num_bits=num_bits,
             is_a_8bit=is_a_8bit,
         )
+        _free_dead_input(_zp_in)
+        del _zp_in
 
     # --- Permute bias ---
     if w13_bias is not None:

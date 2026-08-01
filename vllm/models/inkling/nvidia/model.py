@@ -363,10 +363,12 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             ".w2_md": ".down_proj",
         },
         orig_to_new_stacked={
-            ".attn.wq_du.": (".attn.qkvr.", 0),
-            ".attn.wk_dv.": (".attn.qkvr.", 1),
-            ".attn.wv_dv.": (".attn.qkvr.", 2),
-            ".attn.wr_du.": (".attn.qkvr.", 3),
+            # wr_du is NOT stacked: it stays a standalone ColumnParallelLinear
+            # (loaded under its checkpoint name) so it can keep a different
+            # quantization scheme from q/k/v (e.g. bf16 r with INT4 q/k/v).
+            ".attn.wq_du.": (".attn.qkv.", 0),
+            ".attn.wk_dv.": (".attn.qkv.", 1),
+            ".attn.wv_dv.": (".attn.qkv.", 2),
         },
         orig_to_new_prefix={
             "model.llm.layers.": "model.layers.",
@@ -386,7 +388,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
         },
     )
     packed_modules_mapping = {
-        "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
+        "qkv": ["wq_du", "wk_dv", "wv_dv"],
         "w13": ["w1", "w3"],
     }
     embedding_modules = {
@@ -641,7 +643,7 @@ def _load_inkling_weights(
             # Replicate K/V conv-free GQA heads when tp_size > num_kv_heads.
             if (
                 shard_id in (1, 2)
-                and name.endswith(".attn.qkvr.weight")
+                and name.endswith(".attn.qkv.weight")
                 and weight.shape[0] > 0
             ):
                 lid = _layer_id(name)
